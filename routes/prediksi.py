@@ -21,9 +21,6 @@ def load_models():
         return None, None, None, None
 
 
-# Standar berat ayam kampung biasa per hari (gram/ekor)
-# Sumber: data lapangan mitra & referensi Balitnak
-# Target: bobot akhir ~600g di hari ke-60, total pakan ~2100g/ekor
 STANDAR_BERAT = {
     1: 25,  2: 27,  3: 30,  4: 33,  5: 36,
     6: 39,  7: 43,  8: 47,  9: 51,  10: 55,
@@ -39,8 +36,6 @@ STANDAR_BERAT = {
     56: 525, 57: 540, 58: 555, 59: 578, 60: 600,
 }
 
-# Standar pakan harian ayam kampung biasa (gram/ekor/hari)
-# Total kumulatif hari ke-60 ~2100g/ekor
 STANDAR_PAKAN = {
     1: 4,   2: 4,   3: 5,   4: 5,   5: 6,
     6: 6,   7: 7,   8: 7,   9: 8,   10: 9,
@@ -64,27 +59,6 @@ def get_standar_pakan(hari):
     closest = min(STANDAR_PAKAN.keys(), key=lambda x: abs(x - hari))
     return STANDAR_PAKAN[closest]
 
-def hitung_pakan_fallback(hari, populasi):
-    """Hitung total pakan hari ini berbasis standar ayam kampung (kg)"""
-    pakan_per_ekor_gram = get_standar_pakan(hari)
-    return round((pakan_per_ekor_gram * populasi) / 1000, 2)
-
-def hitung_berat_panen_fallback(hari, berat_rata):
-    """Estimasi berat panen hari ke-60 berbasis tren pertumbuhan standar"""
-    berat_standar_sekarang = get_standar_berat(hari)
-    berat_standar_panen    = get_standar_berat(60)  # 600g
-    sisa_hari              = max(0, 60 - hari)
-
-    if sisa_hari == 0:
-        return round(berat_rata, 2)
-
-    # Proporsi pertumbuhan aktual vs standar
-    rasio = berat_rata / berat_standar_sekarang if berat_standar_sekarang > 0 else 1.0
-
-    # Proyeksi berat panen berdasarkan rasio pertumbuhan aktual
-    berat_panen = berat_standar_panen * rasio
-    return round(max(berat_rata, berat_panen), 2)
-
 
 @prediksi_bp.route('/prediksi', methods=['POST'])
 def prediksi():
@@ -95,8 +69,6 @@ def prediksi():
         mortalitas   = int(data.get('mortalitas', 0))
         berat_rata   = float(data.get('berat_rata'))
         peternak_id  = int(data.get('peternak_id', 1))
-        id_model_rlb = int(data.get('id_model_rlb', 0))
-        id_model_rf  = int(data.get('id_model_rf', 0))
         nama_batch   = data.get('nama_batch', 'Batch')
         tanggal      = data.get('tanggal', '')
     except (TypeError, ValueError) as e:
@@ -107,7 +79,6 @@ def prediksi():
     berat_standar  = get_standar_berat(hari)
     selisih_berat  = berat_rata - berat_standar
 
-    # Status nutrisi berbasis persentase deviasi
     deviasi_persen_check = (selisih_berat / berat_standar) * 100 if berat_standar else 0
     if deviasi_persen_check < -20:
         status_nutrisi = 'Peringatan_Kritis'
@@ -124,28 +95,62 @@ def prediksi():
     input_rf  = np.array([[hari, populasi, mortalitas, berat_rata, 0]])
 
     try:
-        x_rlb          = scaler_r.transform(input_rlb)
-        x_rf           = scaler_f.transform(input_rf)
-        prediksi_pakan = float(rlb.predict(x_rlb)[0])
-        estimasi_berat = float(rf.predict(x_rf)[0])
+        x_rlb              = scaler_r.transform(input_rlb)
+        x_rf               = scaler_f.transform(input_rf)
+        prediksi_pakan_raw = float(rlb.predict(x_rlb)[0])
+        estimasi_berat_raw = float(rf.predict(x_rf)[0])
+        print(f"[MODEL RAW] pakan={prediksi_pakan_raw:.2f}, berat={estimasi_berat_raw:.2f}")
     except Exception as e:
         print(f"Model prediction error: {e}")
         return jsonify({'success': False, 'message': 'Prediksi gagal'}), 500
 
-    # ── Clamp & fallback ──────────────────────────────────
-    # Pakan: kalau model ngawur (≤0), pakai standar ayam kampung
-    total_pakan_rlb = max(0.0, round(prediksi_pakan, 2))
-    if total_pakan_rlb == 0.0:
-        total_pakan_rlb = hitung_pakan_fallback(hari, populasi)
-        print(f"[FALLBACK] Pakan model=0, pakai standar: {total_pakan_rlb} kg")
+    # ── HYBRID CALIBRATION ────────────────────────────────
+    standar_pakan_hari_ini = get_standar_pakan(hari)
+    pakan_standar_total    = round((standar_pakan_hari_ini * populasi) / 1000, 2)
 
-    # Berat panen: kalau model menghasilkan nilai tidak masuk akal
-    # (lebih kecil dari 50% standar berat sekarang), pakai proyeksi standar
-    berat_panen_est = max(0.0, round(estimasi_berat, 2))
-    threshold_wajar = berat_standar * 0.5
-    if berat_panen_est < threshold_wajar:
-        berat_panen_est = hitung_berat_panen_fallback(hari, berat_rata)
-        print(f"[FALLBACK] Berat panen model tidak wajar, pakai proyeksi: {berat_panen_est} g")
+    batas_bawah_pakan = round(pakan_standar_total * 0.90, 2)
+    batas_atas_pakan  = round(pakan_standar_total * 1.10, 2)
+
+    if prediksi_pakan_raw > 0:
+        kontribusi_model = prediksi_pakan_raw * 0.05
+        variasi = kontribusi_model - (pakan_standar_total * 0.05)
+        variasi_clamped = max(-pakan_standar_total * 0.10,
+                              min(pakan_standar_total * 0.10, variasi))
+        total_pakan_rlb = round(pakan_standar_total + variasi_clamped, 2)
+    else:
+        total_pakan_rlb = pakan_standar_total
+
+    total_pakan_rlb = round(
+        max(batas_bawah_pakan, min(batas_atas_pakan, total_pakan_rlb)), 2
+    )
+    print(f"[CALIBRATED PAKAN] standar={pakan_standar_total:.2f}kg, "
+          f"model_raw={prediksi_pakan_raw:.2f}kg, hasil={total_pakan_rlb:.2f}kg")
+
+    rasio_pertumbuhan   = berat_rata / berat_standar if berat_standar > 0 else 1.0
+    berat_panen_standar = round(600.0 * rasio_pertumbuhan, 2)
+
+    if estimasi_berat_raw > 0:
+        selisih_model = estimasi_berat_raw - berat_panen_standar
+        variasi_berat = selisih_model * 0.05
+        variasi_berat_clamped = max(-berat_panen_standar * 0.05,
+                                    min(berat_panen_standar * 0.05, variasi_berat))
+        berat_panen_est = round(berat_panen_standar + variasi_berat_clamped, 2)
+    else:
+        berat_panen_est = berat_panen_standar
+
+    berat_panen_est = max(berat_panen_est, berat_rata)
+    print(f"[CALIBRATED BERAT] rasio={rasio_pertumbuhan:.3f}, "
+          f"standar_panen={berat_panen_standar:.2f}g, hasil={berat_panen_est:.2f}g")
+
+    pakan_kumulatif_gram = sum(get_standar_pakan(h) for h in range(1, hari + 1))
+    if berat_rata > 0:
+        fcr_estimasi = round(pakan_kumulatif_gram / berat_rata, 2)
+        fcr_estimasi = max(3.0, min(5.5, fcr_estimasi))
+    else:
+        fcr_estimasi = 4.0
+    print(f"[FCR] kumulatif_pakan={pakan_kumulatif_gram}g, "
+          f"berat={berat_rata}g, FCR={fcr_estimasi}")
+    # ─────────────────────────────────────────────────────
 
     populasi_panen = populasi_akhir
     total_bobot    = round((berat_panen_est / 1000) * populasi_panen, 2)
@@ -153,16 +158,30 @@ def prediksi():
     tanggal_input  = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     tanggal_date   = datetime.now().date()
 
-    id_model_rlb_db = id_model_rlb if id_model_rlb != 0 else None
-    id_model_rf_db  = id_model_rf  if id_model_rf  != 0 else None
-
     db = None
     try:
         db     = get_db()
         cursor = db.cursor()
 
+        # Ambil id model yang sedang aktif dari database
+        cursor.execute(
+            "SELECT id_model FROM model_prediksi "
+            "WHERE jenis_algoritma = 'Regresi_Linear_Berganda' AND is_aktif = 1 "
+            "ORDER BY trained_at DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        id_model_rlb_db = row['id_model'] if row else None
+
+        cursor.execute(
+            "SELECT id_model FROM model_prediksi "
+            "WHERE jenis_algoritma = 'Random_Forest' AND is_aktif = 1 "
+            "ORDER BY trained_at DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        id_model_rf_db = row['id_model'] if row else None
+
         cursor.execute("""
-            INSERT INTO data_ternak 
+            INSERT INTO data_ternak
             (id_peternak, nama_batch, fase, hari, populasi_pagi, mortalitas,
              populasi_akhir, berat_ratarata, mortalitas_kumulatif, tanggal_input)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -174,7 +193,7 @@ def prediksi():
         print(f"data_ternak inserted: id={id_data_ternak_baru}")
 
         cursor.execute("""
-            INSERT INTO riwayat_prediksi 
+            INSERT INTO riwayat_prediksi
             (id_peternak, id_data_ternak, id_model_rlb, id_model_rf, prediksi_pakan_kg,
              estimasi_berat_panen, estimasi_populasi_panen, estimasi_bobot_total_kg,
              deviasi_berat_persen, status_nutrisi, tanggal_prediksi, is_saved,
@@ -187,7 +206,8 @@ def prediksi():
             nama_batch, tanggal_input, hari, fase, populasi, mortalitas
         ))
         riwayat_id = cursor.lastrowid
-        print(f"riwayat_prediksi inserted: id={riwayat_id}")
+        print(f"riwayat_prediksi inserted: id={riwayat_id} "
+              f"(id_model_rlb={id_model_rlb_db}, id_model_rf={id_model_rf_db})")
 
         if status_nutrisi in ('Peringatan_Ringan', 'Peringatan_Kritis'):
             jenis_peringatan = 'Ringan' if status_nutrisi == 'Peringatan_Ringan' else 'Kritis'
@@ -203,7 +223,7 @@ def prediksi():
                 (id_peternak, id_prediksi, jenis_peringatan, pesan, deviasi_persen, is_dibaca)
                 VALUES (%s, %s, %s, %s, %s, 0)
             """, (peternak_id, riwayat_id, jenis_peringatan, pesan_notif, deviasi_persen))
-            print(f"notifikasi_kualitas_pakan inserted untuk riwayat_id={riwayat_id}")
+            print(f"notifikasi inserted untuk riwayat_id={riwayat_id}")
 
         db.commit()
 
@@ -249,7 +269,10 @@ def prediksi():
             'status_nutrisi':          status_nutrisi,
             'pesan_nutrisi':           pesan_nutrisi_map.get(status_nutrisi, ''),
             'standar_berat':           berat_standar,
-            'standar_pakan_hari':      get_standar_pakan(hari),
+            'standar_pakan_hari':      standar_pakan_hari_ini,
+            'fcr':                     fcr_estimasi,
+            'model_raw_pakan':         round(prediksi_pakan_raw, 2),
+            'model_raw_berat':         round(estimasi_berat_raw, 2),
         }
     })
 
@@ -304,25 +327,22 @@ def get_notifikasi(peternak_id):
             (peternak_id,)
         )
         rows = cursor.fetchall()
-
         notifikasi = []
         for r in rows:
             notifikasi.append({
-                'id': r['id_notifikasi'],
-                'id_prediksi': r['id_prediksi'],
+                'id':               r['id_notifikasi'],
+                'id_prediksi':      r['id_prediksi'],
                 'jenis_peringatan': r['jenis_peringatan'],
-                'pesan': r['pesan'],
-                'deviasi_persen': float(r['deviasi_persen']),
-                'is_dibaca': bool(r['is_dibaca']),
-                'created_at': r['created_at'].isoformat() if r['created_at'] else None,
-                'dibaca_at': r['dibaca_at'].isoformat() if r['dibaca_at'] else None,
-                'nama_batch': r['nama_batch'] or '-',
-                'hari': r['hari'],
-                'fase': r['fase'],
+                'pesan':            r['pesan'],
+                'deviasi_persen':   float(r['deviasi_persen']),
+                'is_dibaca':        bool(r['is_dibaca']),
+                'created_at':       r['created_at'].isoformat() if r['created_at'] else None,
+                'dibaca_at':        r['dibaca_at'].isoformat() if r['dibaca_at'] else None,
+                'nama_batch':       r['nama_batch'] or '-',
+                'hari':             r['hari'],
+                'fase':             r['fase'],
             })
-
         return jsonify({'success': True, 'data': notifikasi})
-
     except Exception as e:
         print(f"GET NOTIFIKASI ERROR: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500

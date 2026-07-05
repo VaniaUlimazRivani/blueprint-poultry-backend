@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, r2_score
 import joblib, os
+from config import get_db
 
 df = pd.read_excel('dataset_blueprint_poultry_FINAL.xlsx', sheet_name='Dataset')
 print(f"Dataset: {df.shape[0]} baris")
@@ -31,17 +32,16 @@ rlb.fit(X_train_rs, y_train_r)
 yp_pred  = rlb.predict(X_test_rs)
 mape_rlb = mean_absolute_percentage_error(y_test_r, yp_pred) * 100
 r2_rlb   = r2_score(y_test_r, yp_pred)
-rmse_rlb = np.sqrt(mean_squared_error(y_test_r, yp_pred))
+mse_rlb  = mean_squared_error(y_test_r, yp_pred)
+rmse_rlb = np.sqrt(mse_rlb)
 print(f"    RMSE : {rmse_rlb:.4f} | MAPE : {mape_rlb:.2f}% | R² : {r2_rlb:.4f}")
 print(f"    Status: {'✅ Sangat Baik' if mape_rlb < 10 else '✅ Baik'}")
 
 # ── RF: Prediksi Berat 7 Hari ke Depan ───────────────────
-# Target = berat rata-rata 7 hari ke depan (lebih realistis)
 rf_rows = []
 for batch in df['Batch'].unique():
     batch_df = df[df['Batch'] == batch].sort_values('Hari').reset_index(drop=True)
     for i, row in batch_df.iterrows():
-        # Target: berat 7 hari ke depan
         future_idx = min(i + 7, len(batch_df) - 1)
         berat_future = batch_df.loc[future_idx, 'Berat_Ratarata_Gram']
         rf_rows.append({
@@ -79,22 +79,59 @@ rf.fit(X_train_fs, y_train_f)
 yf_pred = rf.predict(X_test_fs)
 mape_rf  = mean_absolute_percentage_error(y_test_f, yf_pred) * 100
 r2_rf    = r2_score(y_test_f, yf_pred)
-rmse_rf  = np.sqrt(mean_squared_error(y_test_f, yf_pred))
+mse_rf   = mean_squared_error(y_test_f, yf_pred)
+rmse_rf  = np.sqrt(mse_rf)
 print(f"    RMSE : {rmse_rf:.4f} | MAPE : {mape_rf:.2f}% | R² : {r2_rf:.4f}")
 print(f"    Status: {'✅ Sangat Baik' if mape_rf < 10 else '✅ Baik' if mape_rf < 20 else '⚠️ Cukup'}")
 
-# Simpan
+# Simpan file model
 os.makedirs('models_saved', exist_ok=True)
 joblib.dump(rlb,       'models_saved/model_rlb.pkl')
 joblib.dump(rf,        'models_saved/model_rf.pkl')
 joblib.dump(scaler_rlb,'models_saved/scaler_rlb.pkl')
 joblib.dump(scaler_rf, 'models_saved/scaler_rf.pkl')
 
-# Simpan info target RF untuk dipakai di endpoint
 import json
 json.dump({'rf_target': 'berat_7hari_ke_depan'},
           open('models_saved/model_info.json', 'w'))
 
 print("\n✅ 4 file model + info tersimpan di models_saved/")
+
+
+# ── SIMPAN METADATA MODEL KE DATABASE ─────────────────────
+def simpan_model_ke_db(jenis_algoritma, versi, nama_file, jumlah_data, mse, rmse, mape, r2):
+    db = get_db()
+    cursor = db.cursor()
+    try:
+        # Nonaktifkan model lama dengan jenis algoritma yang sama
+        cursor.execute(
+            "UPDATE model_prediksi SET is_aktif = 0 WHERE jenis_algoritma = %s",
+            (jenis_algoritma,)
+        )
+        cursor.execute("""
+            INSERT INTO model_prediksi
+            (id_pengelola, jenis_algoritma, versi, nama_file_model,
+             jumlah_data_latih, mse, rmse, mape, r2_score, is_aktif)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+        """, (1, jenis_algoritma, versi, nama_file, jumlah_data,
+              float(mse), float(rmse), float(mape), float(r2)))
+        db.commit()
+        return cursor.lastrowid
+    finally:
+        db.close()
+
+
+print("\n[3] Menyimpan metadata model ke database...")
+id_model_rlb = simpan_model_ke_db(
+    'Regresi_Linear_Berganda', 'v1.0', 'model_rlb.pkl',
+    len(X_train_r), mse_rlb, rmse_rlb, mape_rlb, r2_rlb
+)
+id_model_rf = simpan_model_ke_db(
+    'Random_Forest', 'v1.0', 'model_rf.pkl',
+    len(X_train_f), mse_rf, rmse_rf, mape_rf, r2_rf
+)
+print(f"✅ Model tersimpan ke database: id_model_rlb={id_model_rlb}, id_model_rf={id_model_rf}")
+
+print("\nRingkasan:")
 print("   RLB → prediksi total pakan harian (kg)")
 print("   RF  → estimasi berat ayam 7 hari ke depan (g)")
