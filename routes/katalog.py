@@ -6,6 +6,7 @@ katalog_bp = Blueprint('katalog', __name__)
 
 @katalog_bp.route('/katalog', methods=['GET'])
 def get_katalog():
+    db = None
     try:
         db = get_db()
         cursor = db.cursor()
@@ -47,11 +48,13 @@ def get_katalog():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @katalog_bp.route('/katalog/semua', methods=['GET'])
 def get_katalog_semua():
+    db = None
     try:
         db = get_db()
         cursor = db.cursor()
@@ -92,7 +95,8 @@ def get_katalog_semua():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @katalog_bp.route('/katalog', methods=['POST'])
@@ -111,6 +115,7 @@ def tambah_katalog():
         return jsonify({'success': False,
                         'message': 'Nama racikan wajib diisi'}), 400
 
+    db = None
     try:
         db = get_db()
         cursor = db.cursor()
@@ -147,7 +152,8 @@ def tambah_katalog():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @katalog_bp.route('/katalog/<int:katalog_id>', methods=['PUT'])
@@ -165,6 +171,7 @@ def edit_katalog(katalog_id):
         return jsonify({'success': False,
                         'message': 'Nama racikan wajib diisi'}), 400
 
+    db = None
     try:
         db = get_db()
         cursor = db.cursor()
@@ -202,11 +209,13 @@ def edit_katalog(katalog_id):
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @katalog_bp.route('/katalog/<int:katalog_id>', methods=['DELETE'])
 def hapus_katalog(katalog_id):
+    db = None
     try:
         db = get_db()
         cursor = db.cursor()
@@ -224,11 +233,13 @@ def hapus_katalog(katalog_id):
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @katalog_bp.route('/katalog/<int:katalog_id>/toggle', methods=['PUT'])
 def toggle_katalog(katalog_id):
+    db = None
     try:
         db = get_db()
         cursor = db.cursor()
@@ -252,4 +263,5 @@ def toggle_katalog(katalog_id):
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        db.close()
+        if db:
+            db.close()
