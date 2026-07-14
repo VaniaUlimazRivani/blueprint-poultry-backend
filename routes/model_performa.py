@@ -13,12 +13,16 @@ def _tanggal_indo(dt, dengan_hari=False):
         return f"{dt.day:02d} {BULAN[dt.month-1]} {dt.year}"
     return f"{BULAN[dt.month-1]} {dt.year}"
 
+# === PERUBAHAN DI SINI (Menyesuaikan standar Lewis, 1982) ===
 def _status_label(mape):
-    if mape <= 5:
+    if mape < 10:
+        return 'Sangat Baik'
+    elif mape <= 20:
         return 'Baik'
-    elif mape <= 10:
+    elif mape <= 50:
         return 'Cukup'
-    return 'Perlu Update'
+    return 'Buruk'
+# ============================================================
 
 def _build_model_data(cursor, jenis, nama_display):
     cursor.execute(
@@ -49,7 +53,7 @@ def _build_model_data(cursor, jenis, nama_display):
         'mape':            mape_aktif,
         'r2':              float(aktif['r2_score']) if aktif['r2_score'] is not None else 0.0,
         'data_latih':      aktif['jumlah_data_latih'],
-        'status':          _status_label(mape_aktif),
+        'status':          _status_label(mape_aktif), # Status otomatis berubah di sini
         'history':         history,
     }
 
